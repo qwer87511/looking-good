@@ -169,6 +169,17 @@ function renderEncore(){
  if(publicStatic())proof.append(el('p','Encore 發布快照 · 分類以最後讀取時間為準，非即時同步','tiny'));
  else proof.append(el('p','固定正式端點 local-endpoint-disabled','tiny'),el('p','原離線匯入 '+stamp(offline.imported_at)+' · 與正式讀取分開','tiny'));
 }
+function variantChoices(entry,chart){
+ const box=el('section',undefined,'source-state model-variants');box.append(el('h3','同型號 · 分規格追蹤'));
+ box.append(el('p',`${chart.country==='JP'?'日本':chart.country}榜 · 第 ${entry.rank} 名 · ${chart.period_label}`,'tiny'),el('p','排名與各地規格的缺貨、出貨證據分開。','muted'));
+ for(const variant of entry.linked_variants||[]){
+  const own=(snapshot.items||[]).find(i=>i.key===variant.key),row=el('div',undefined,'variant-choice');
+  const button=el('button',`${variant.region} · ${variant.variant} →`,'detail-button');button.dataset.variantKey=variant.key;button.addEventListener('click',()=>navigate('product/'+encodeURIComponent(variant.key)));
+  row.append(button,el('p',(own?.shortage_history?.status==='evidenced'?'曾觀測缺貨':'缺貨史待核實')+' · '+(own&&currentStock(own)!=='unknown'?statuses[currentStock(own)]:'目前庫存未知'),'tiny'));box.append(row);
+ }
+ if(!(entry.linked_variants||[]).length)box.append(el('p','尚未核實相符規格；目前庫存、官方出貨與台灣配送待查。','muted'));
+ return box;
+}
 function renderProduct(key){
  const container=$('product-content');container.replaceChildren();const back=el('button','← 返回'+(returnPoint?.mode===lastListMode?returnPoint.label:lastListMode==='rankings'?'熱銷排行':'熱銷追蹤'));container.append(back);
  const model=(snapshot.model_history?.events||[]).find(e=>key===e.model_key||(e.current_options||[]).some(o=>key===e.model_key+':option:'+o.option_id));
@@ -180,18 +191,15 @@ function renderProduct(key){
  const item=observed||entry;if(!item){container.append(el('p','找不到此商品身份；請返回來源清單重新選擇。','empty'));return;}
  const panel=el('article',undefined,'product-detail');panel.append(el('p',observed?'規格追蹤':'由熱銷排行進入','eyebrow'),el('h2',item.title));
  if(observed)panel.append(purchaseSummary(item,entry,chart));
+ if(!observed&&entry?.identity_scope==='brand_model')panel.append(variantChoices(entry,chart));
  if(observed){const timeline=el('section',undefined,'history');timeline.append(el('h3','歷史觀測 · 不代表目前庫存'),el('p',historyNote(item),'muted'));for(const h of [...(item.history||[])].reverse()){const excluded=h.evidence_integrity?.stock_proof==='incomplete';timeline.append(el('p',`${stamp(h.fetched_at)} · ${statuses[h.stock]||'未知'}${excluded?' · 缺原件，已排除':''}`,'tiny'))}panel.append(timeline);}
  const facts=el('dl');const history=item.shortage_history||{status:'unverified',entries:[]};
  const add=(name,value)=>facts.append(el('dt',name),el('dd',value));add('商品身份',observed?item.variant:item.identity_scope==='brand_model'?item.brand+' · '+item.title+' · 型號層級，顏色未拆分':'ISBN '+item.isbn);add('來源市場',observed?item.region:chart.country);if(chart)add('原榜名次',chart.source_name+' · '+chart.period_label+' · 第 '+entry.rank+' 名'+(entry.identity_scope==='brand_model'?'（日本型號榜）':''));
  if(!observed){add('目前庫存','官方庫存尚未核實');add('官方出貨','尚未核實');add('台灣配送','尚未核實');}add('近兩年缺貨',history.status==='evidenced'?`已取證 ${history.entries.length} 次觀測`:'尚未取得證據；上榜不代表缺貨');add('觀測起點',history.coverage_start?time(history.coverage_start)+'；更早歷史未知':'尚未開始缺貨觀測');
  add('首次缺貨觀測',history.first_shortage_observed_on||'尚未觀測');add('本地規格缺貨公告',(history.evidence_counts?.dated_official_announcements||0)+' 筆已核實');add('缺貨持續時間','未知；觀測日不等於開始日');
  if(observed){add('來源價格',item.price?`${item.currency} ${Number(item.price).toLocaleString('zh-TW')}`:'待核實');add('來源取證',time(item.fetched_at)+(item.stale?' · 已過期':''));}
- if(entry)add('詳頁身份',entry.identity_scope==='brand_model'?'原榜品牌與完整型號；不同市場／SKU 分開':entry.detail_checked?'原榜 ISBN 已與原始商品頁核對':'僅原榜 ISBN；原始詳頁尚未核對');if(observed){const details=el('details',undefined,'purchase-history');details.append(el('summary','缺貨證據與原始身份'),facts);panel.append(details);}else panel.append(facts);
- if(entry?.identity_scope==='brand_model'){
-  const model=el('section',undefined,'source-state');model.append(el('h3','同型號 · 分規格追蹤'),el('p','僅品牌與完整型號相符；日本排名不代表台灣規格銷量或缺貨。','muted'));
-  for(const variant of entry.linked_variants||[]){const button=el('button',`${variant.region} · ${variant.variant} →`,'detail-button');button.addEventListener('click',()=>navigate('product/'+encodeURIComponent(variant.key)));model.append(button);}
-  if(!(entry.linked_variants||[]).length)model.append(el('p','尚未核實相符的官方規格；缺貨與出貨待查。','muted'));panel.append(model);
- }
+ if(entry)add('詳頁身份',entry.identity_scope==='brand_model'?'原榜品牌與完整型號；不同市場／SKU 分開':entry.detail_checked?'原榜 ISBN 已與原始商品頁核對':'僅原榜 ISBN；原始詳頁尚未核對');if(observed||entry?.identity_scope==='brand_model'){const details=el('details',undefined,observed?'purchase-history':'model-facts');details.append(el('summary',observed?'缺貨證據與原始身份':'原榜身份與未核實範圍'),facts);panel.append(details);}else panel.append(facts);
+ if(observed&&entry?.identity_scope==='brand_model')panel.append(variantChoices(entry,chart));
  for(const gap of history.evidence_gaps||[])panel.append(el('p',`${gap.observed_date} · 舊紀錄缺原始佐證，未計入已驗證缺貨。`,'tiny'));
  for(const event of item.related_supply_history||[]){const box=el('section',undefined,'source-state');box.append(el('h3','日本型號供貨紀錄'),el('p',`${event.published_date} · 官方確認先前曾停接單`),el('p',`${event.announcement_effective_date} · 宣布恢復接單，並非現貨保證`,'muted'),el('p','未分顏色；不作台灣 SKU 缺貨證據。開始日與結束日未知。','tiny'),link('查看日本官方公告',event.source_url),el('p',`公告取證 ${time(event.fetched_at)}`,'tiny'));panel.append(box);}
  if(observed){panel.append(link('查看來源商品頁',item.url),el('p',item.shipping_note,'muted'));for(const event of history.entries.slice(-6))panel.append(el('p',`${event.observed_date} · 庫存觀測，非歷史公告；持續時間未知`,'tiny'));}
