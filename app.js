@@ -6,6 +6,14 @@ let currentMode='rankings',lastListMode='rankings';
 let returnPoint=null,renderedRoute=null;
 let ticketFilter='upcoming_sales';
 let rankingSource='all';
+let rankingCategory='all',rankingCountry='all',rankingPeriod='all',rankingSearch='',rankingPage=1;
+let trackingCategory='all',trackingRegion='all',trackingPage=1;
+const countryName=value=>({TW:'台灣',JP:'日本',US:'美國',KR:'韓國',CA:'加拿大',AU:'澳洲',DE:'德國',GB:'英國',unknown:'地區未核實'}[value]||value);
+const rankLabel=e=>e.rank==null?'原榜位置 '+e.source_position:'第 '+e.rank+' 名';
+const chartCategory=c=>c.category_group||(c.source_id==='capa-yodobashi-compact'?'相機／光學':'書籍');
+const chartStale=c=>c.stale||!Number.isFinite(Date.parse(c.fetched_at))||Date.parse(c.fetched_at)>Date.now()||Date.now()-Date.parse(c.fetched_at)>=(c.freshness_seconds||3600)*1000;
+const itemCategory=i=>i.category||((i.source_id==='adafruit'||i.source==='Adafruit')?'電子零件／開發板':i.source_id==='hanchor'?'包袋／戶外':i.source_id==='canon-tw'?'相機／光學':'未分類');
+function scopeSelect(container,id,label,values,current,onChange){const wrap=el('label',undefined,'scope-select');wrap.append(el('span',label));const select=el('select');select.id=id;for(const value of ['all',...new Set(values)]){const option=el('option',value==='all'?'全部':id.includes('country')||id.includes('region')?countryName(value):value);option.value=value;select.append(option);}select.value=current;select.addEventListener('change',()=>onChange(select.value));wrap.append(select);container.append(wrap);}
 const publicStatic=()=>snapshot?.publication?.mode==='static';
 const time = value => value ? new Intl.DateTimeFormat('zh-TW',{timeZone:'Asia/Taipei',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(value)) : '尚未取證';
 const stamp=value=>value?new Intl.DateTimeFormat('zh-TW',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(value)):'未取證';
@@ -61,8 +69,12 @@ function render(){
  $('audit-state').textContent=quality.status==='failed'?'整體稽核 failed':quality.status==='passed'?'整體稽核通過':'尚未稽核';
  $('audit-state').classList.toggle('error',quality.status==='failed');$('quality-verified').textContent=`可驗缺貨觀測 ${qualityCounts.stock_observations||0} 筆`;$('quality-excluded').textContent=`歷史證據缺失 ${qualityCounts.unverifiable_stock_records||0} 筆 · 已排除`;
  $('quality-note').textContent=`缺失紀錄保留，不計入已驗歷史；其餘可驗資料持續顯示。${quality.audited_at?'稽核 '+time(quality.audited_at):''}`;
- const q=$('search').value.trim().toLocaleLowerCase();const selected=items.filter(x=>(!q||(x.title+' '+x.variant).toLocaleLowerCase().includes(q))&&(filter==='all'||filter==='purchasable'&&currentStock(x)==='in_stock'&&x.purchasable_verified||filter==='unknown'&&(currentStock(x)==='unknown'||x.taiwan_shipping!=='verified')||currentStock(x)===filter));
- const cards=$('cards');cards.replaceChildren();for(const item of selected)cards.append(card(item));
+ const taxonomy=$('tracking-scopes');taxonomy.replaceChildren();scopeSelect(taxonomy,'tracking-category','品類',[...items.map(itemCategory),'包袋／戶外'],trackingCategory,v=>{trackingCategory=v;trackingPage=1;render();$('tracking-category').focus();});scopeSelect(taxonomy,'tracking-region','觀測地區',[...items.map(i=>i.region),'unknown'],trackingRegion,v=>{trackingRegion=v;trackingPage=1;render();$('tracking-region').focus();});
+ const q=$('search').value.trim().toLocaleLowerCase();const selected=items.filter(x=>(trackingCategory==='all'||itemCategory(x)===trackingCategory)&&(trackingRegion==='all'||x.region===trackingRegion)&&(!q||(x.title+' '+x.variant).toLocaleLowerCase().includes(q))&&(filter==='all'||filter==='purchasable'&&currentStock(x)==='in_stock'&&x.purchasable_verified||filter==='unknown'&&(currentStock(x)==='unknown'||x.taiwan_shipping!=='verified')||currentStock(x)===filter));
+ const pages=Math.max(1,Math.ceil(selected.length/8));trackingPage=Math.min(trackingPage,pages);
+ $('tracking-result-count').textContent='符合 '+selected.length+' 個規格 · 第 '+trackingPage+'／'+pages+' 頁；目前庫存與曾缺貨分開。';
+ const cards=$('cards');cards.replaceChildren();for(const item of selected.slice((trackingPage-1)*8,trackingPage*8))cards.append(card(item));
+ const pager=$('tracking-pages');pager.replaceChildren();if(pages>1){for(const [label,step] of [['← 上一頁',-1],['下一頁 →',1]]){const b=el('button',label);b.dataset.trackingPage=step;b.disabled=trackingPage+step<1||trackingPage+step>pages;b.addEventListener('click',()=>{trackingPage+=step;render();const focus=pager.querySelector('[data-tracking-page="'+step+'"]');(focus?.disabled?pager.querySelector('button:not(:disabled)'):focus)?.focus();$('tracking-result-count').scrollIntoView?.({block:'start'});});pager.append(b);}}
  if(!selected.length){const empty=el('div',undefined,'empty');empty.append(el('strong',items.length?'目前沒有符合的商品':'等待第一筆官方觀測'),el('p',filter==='purchasable'?'只有庫存、官方出貨與台灣配送都核實，才會出現在這裡。':'可調整篩選，或按「查核來源」取得真實資料。','muted'));cards.append(empty);}
  $('coverage').textContent=snapshot.coverage.region+'。'+snapshot.coverage.demand+'。';$('gaps').textContent='尚未覆蓋：'+snapshot.coverage.gaps.join('、')+'。';
  $('tracking-window').textContent=snapshot.tracking_window?`${snapshot.tracking_window.start_date} 至 ${snapshot.tracking_window.end_date} · 只計已取證缺貨`:'僅列出已取得近兩年缺貨證據的規格';
@@ -100,20 +112,31 @@ function focusRoute(){
  else{const section=$(currentMode==='tracking'?'tracking-mode':'ranking-mode');section.scrollIntoView({block:'start',behavior:'instant'});const heading=section.querySelector('h2');if(heading){heading.tabIndex=-1;heading.focus({preventScroll:true});}}
 }
 function renderRankings(){
- const container=$('ranking-content');container.replaceChildren();
- const charts=snapshot.rankings||[];if(rankingSource!=='all'&&!charts.some(c=>c.source_id===rankingSource))rankingSource='all';
+ const container=$('ranking-content');container.replaceChildren();const charts=(snapshot.rankings||[]).map(c=>({...c,stale:chartStale(c)}));
+ const scopes=$('ranking-scopes');scopes.replaceChildren();
+ const change=(key,value)=>{if(key==='category')rankingCategory=value;if(key==='country')rankingCountry=value;if(key==='period')rankingPeriod=value;rankingSource='all';rankingPage=1;rankingSearch='';renderRankings();$('ranking-'+key)?.focus?.();say('已篩選榜單；保留原地區、期間與口徑。');};
+ scopeSelect(scopes,'ranking-category','品類',[...charts.map(chartCategory),'包袋／戶外'],rankingCategory,v=>change('category',v));scopeSelect(scopes,'ranking-country','地區',[...charts.map(c=>c.country),'KR'],rankingCountry,v=>change('country',v));scopeSelect(scopes,'ranking-period','期間',charts.map(c=>c.period_label),rankingPeriod,v=>change('period',v));
+ const filtered=charts.filter(c=>(rankingCategory==='all'||chartCategory(c)===rankingCategory)&&(rankingCountry==='all'||c.country===rankingCountry)&&(rankingPeriod==='all'||c.period_label===rankingPeriod));
+ if(rankingSource!=='all'&&!filtered.some(c=>c.source_id===rankingSource))rankingSource='all';
  const controls=$('ranking-filters');controls.replaceChildren();
- for(const option of [{id:'all',label:'全部 '+charts.length+' 榜'},...charts.map(c=>({id:c.source_id,label:(c.country==='TW'?'台灣':c.country==='JP'?'日本':c.country)+' · '+c.category,description:c.source_name+' · '+c.period_label}))]){
-  const b=el('button',option.label);b.dataset.rankingSource=option.id;b.classList.toggle('selected',rankingSource===option.id);b.setAttribute('aria-pressed',String(rankingSource===option.id));if(option.description)b.setAttribute('aria-label',option.description);b.addEventListener('click',()=>{const top=b.getBoundingClientRect?.().top;rankingSource=option.id;renderRankings();const next=[...controls.children].find(n=>n.dataset.rankingSource===option.id);next?.focus?.({preventScroll:true});if(typeof window!=='undefined'&&Number.isFinite(top))window.scrollBy(0,next.getBoundingClientRect().top-top);say('已顯示 '+option.label+'；保留各榜原名次，未合併總榜。');});controls.append(b);
+ const choose=id=>{rankingSource=id;rankingPage=1;rankingSearch='';renderRankings();$('ranking-content').scrollIntoView?.({block:'start'});$('ranking-content').querySelector('h3')?.focus?.();};
+ const all=el('button','榜單目錄 '+filtered.length);all.dataset.rankingSource='all';all.addEventListener('click',()=>choose('all'));controls.append(all);
+ $('ranking-source-count').textContent=charts.length+' 份真榜 · '+charts.reduce((n,c)=>n+c.entries.length,0)+' 個來源榜項';
+ if(rankingSource==='all'){
+  for(const c of filtered){const panel=el('article',undefined,'chart chart-index');panel.append(el('h3',c.source_name+' · '+c.chart_name),el('p',countryName(c.country)+' · '+c.category+' · '+c.period_label,'muted'),el('p',c.entries.length+' 項 · '+(c.stale?'資料過期':'來源已取證'),'tiny'));const b=el('button','開啟榜單 →');b.dataset.rankingSource=c.source_id;b.addEventListener('click',()=>choose(c.source_id));panel.append(b);container.append(panel);}
+  if((rankingCountry==='all'||rankingCountry==='KR')&&(rankingCategory==='all'||rankingCategory==='包袋／戶外')){const missing=el('article',undefined,'chart chart-index pending-source');missing.append(el('h3','MUSINSA 韓國男士側背包'),el('p','待取得允許來源 · 尚未接入','pill'),el('p','既有自動存取限制保留；性別、側背包分類與真期間待核實。不是其他男裝或女包榜。','muted'));container.append(missing);}
+  if(!filtered.length)container.append(el('p','此條件尚無已接入真榜。','empty'));
+ }else{
+  const chart=filtered.find(c=>c.source_id===rankingSource),panel=el('article',undefined,'chart');const heading=el('h3',chart.source_name+' · '+chart.chart_name);heading.tabIndex=-1;panel.append(heading,el('p',countryName(chart.country)+' · '+chart.category+' · '+chart.period_label,'pill'),el('p','來源更新 '+stamp(chart.source_updated_at)+' · 取得 '+stamp(chart.fetched_at)+(chart.stale?' · 已過期':''),'tiny'));
+  const search=el('input');search.id='ranking-item-search';search.type='search';search.placeholder='在這份榜找商品';search.setAttribute('aria-label','在所選榜單搜尋商品');search.value=rankingSearch;search.addEventListener('input',()=>{rankingSearch=search.value;rankingPage=1;const at=search.selectionStart;renderRankings();const next=$('ranking-item-search');next.focus();next.setSelectionRange?.(at,at);});panel.append(search);
+  const entries=chart.entries.filter(e=>(e.title+' '+(e.brand||'')).toLocaleLowerCase().includes(rankingSearch.toLocaleLowerCase())),pages=Math.max(1,Math.ceil(entries.length/10));rankingPage=Math.min(rankingPage,pages);panel.append(el('p',entries.length+' 項 · 第 '+rankingPage+'／'+pages+' 頁 · 保留原榜位置','tiny'));
+  for(const entry of entries.slice((rankingPage-1)*10,rankingPage*10)){
+   const row=el('div',undefined,'rank-row'),number=el('span',(entry.rank==null?'序 ':'')+String(entry.rank??entry.source_position).padStart(2,'0'),'rank-no');row.append(number);const text=el('div');text.append(el('h3',entry.title),el('p',entry.product_kind==='digital'?'數位商品 · 不作實體缺貨證據':(entry.linked_variants||[]).some(v=>v.shortage_status==='evidenced')?'同型號有已驗規格 · 分市場核對':'缺貨歷史待核實','tiny'));const open=el('button','查看詳頁 →','detail-button');open.dataset.returnKey='ranking:'+chart.source_id+':'+entry.identity_key;open.setAttribute('aria-label',rankLabel(entry)+' '+entry.title);open.addEventListener('click',()=>navigate('product/'+encodeURIComponent(entry.identity_key),{key:open.dataset.returnKey,label:rankLabel(entry),chartId:chart.source_id}));row.append(text,open);panel.append(row);
+  }
+  if(!entries.length)panel.append(el('p','此榜沒有符合的商品。','empty'));
+  const pagination=el('div',undefined,'pagination');for(const [label,delta] of [['上一頁',-1],['下一頁',1]]){const b=el('button',label);b.disabled=delta<0?rankingPage===1:rankingPage===pages;b.dataset.rankingPage=String(delta);b.addEventListener('click',()=>{rankingPage+=delta;renderRankings();$('ranking-content').scrollIntoView?.({block:'start'});});pagination.append(b);}panel.append(pagination);
+  const basis=el('details');basis.append(el('summary','來源方法與範圍'),el('p',chart.ranking_basis,'muted'),el('p',chart.rank_semantics||'原榜明確數字名次','tiny'),el('p',chart.coverage,'tiny'),el('p',chart.variant_aggregation,'tiny'));panel.append(link('查看原榜',chart.source_url),basis);container.append(panel);
  }
- $('ranking-source-count').textContent=charts.length+' 份獨立榜 · 期間各自計算';
- for(const chart of charts.filter(c=>rankingSource==='all'||c.source_id===rankingSource)){
-  const panel=el('article',undefined,'chart');panel.append(el('h3',chart.source_name+' · '+chart.chart_name));
-  const meta=el('div',undefined,'chart-meta');for(const text of [chart.country==='TW'?'台灣':chart.country,chart.category,chart.period_label,...(chart.stale?['資料過期']:[])])meta.append(el('span',text,'pill'));panel.append(meta,el('p',`取證 ${time(chart.fetched_at)}`,'tiny'));
-  for(const entry of chart.entries){const row=el('div',undefined,'rank-row');row.append(el('span',String(entry.rank).padStart(2,'0'),'rank-no'));const text=el('div');const title=el('h3',entry.title);title.title=entry.title;const matched=(entry.linked_variants||[]).filter(v=>v.shortage_status==='evidenced');text.append(title,el('p',matched.length?`同型號連結 ${matched.length} 個台灣規格 · 證據分市場`:entry.shortage_history.status==='evidenced'?'已找到缺貨證據':'缺貨歷史待核實','tiny'));row.append(text);const open=el('button','查看追蹤 →','detail-button');open.dataset.returnKey='ranking:'+chart.source_id+':'+entry.identity_key;open.setAttribute('aria-label',`${chart.source_name} 第 ${entry.rank} 名 ${entry.title}，查看追蹤`);open.addEventListener('click',()=>navigate('product/'+encodeURIComponent(entry.identity_key),{key:open.dataset.returnKey,label:'原榜第 '+entry.rank+' 名',chartId:chart.source_id}));row.append(open);panel.append(row);}
-  const basis=el('details');basis.append(el('summary','排名口徑與範圍'),el('p',chart.ranking_basis,'muted'),el('p',chart.coverage,'tiny'),el('p',chart.variant_aggregation,'tiny'),el('p',`來源更新時間：${chart.source_updated_at||'未提供'}`,'tiny'));basis.append(el('p','來源銷售排序不等於品牌官方出貨、現貨或台灣規格銷量。','tiny'));panel.append(link('查看原榜',chart.source_url),basis);container.append(panel);
- }
- if(!(snapshot.rankings||[]).length){const box=el('div',undefined,'empty');box.append(el('strong','榜單尚未接入'),el('p','保留原始排名與期間；不預填示範 Top 榜。','muted'));container.append(box);}
  const states=$('ranking-status');states.replaceChildren();for(const source of snapshot.ranking_source_status||[]){const box=el('div',undefined,'source-state');box.append(el('strong',source.source),el('p',source.reason,'muted'),link('來源狀態依據',source.url));states.append(box);}
 }
 function renderRoute(target,announce=false){
@@ -190,15 +213,19 @@ function renderProduct(key){
  for(const c of charts){const found=c.entries.find(x=>x.identity_key===key||(x.linked_variants||[]).some(v=>v.key===key));if(found){entry=found;chart=c;break;}}
  const item=observed||entry;if(!item){container.append(el('p','找不到此商品身份；請返回來源清單重新選擇。','empty'));return;}
  const panel=el('article',undefined,'product-detail');panel.append(el('p',observed?'規格追蹤':'由熱銷排行進入','eyebrow'),el('h2',item.title));
+ if(entry?.product_kind==='digital'){
+  panel.append(el('p',countryName(chart.country)+' · '+chart.category+' · '+rankLabel(entry),'pill'),el('p',chart.period_label,'muted'),el('p','Apple內容ID '+entry.product_id+' · '+(entry.brand||'發行者未提供'),'tiny'),el('p','數位商品；這份榜不提供實體缺貨、官方出貨或寄台灣的證明。','muted'),el('p','來源更新 '+stamp(chart.source_updated_at)+' · 取得 '+stamp(chart.fetched_at),'tiny'),link('查看來源商品 ↗',entry.reference_product_url));
+  container.append(panel);return;
+ }
  if(observed)panel.append(purchaseSummary(item,entry,chart));
  if(!observed&&entry?.identity_scope==='brand_model')panel.append(variantChoices(entry,chart));
  if(observed){const timeline=el('section',undefined,'history');timeline.append(el('h3','歷史觀測 · 不代表目前庫存'),el('p',historyNote(item),'muted'));for(const h of [...(item.history||[])].reverse()){const excluded=h.evidence_integrity?.stock_proof==='incomplete';timeline.append(el('p',`${stamp(h.fetched_at)} · ${statuses[h.stock]||'未知'}${excluded?' · 缺原件，已排除':''}`,'tiny'))}panel.append(timeline);}
  const facts=el('dl');const history=item.shortage_history||{status:'unverified',entries:[]};
- const add=(name,value)=>facts.append(el('dt',name),el('dd',value));add('商品身份',observed?item.variant:item.identity_scope==='brand_model'?item.brand+' · '+item.title+' · 型號層級，顏色未拆分':'ISBN '+item.isbn);add('來源市場',observed?item.region:chart.country);if(chart)add('原榜名次',chart.source_name+' · '+chart.period_label+' · 第 '+entry.rank+' 名'+(entry.identity_scope==='brand_model'?'（日本型號榜）':''));
- if(!observed){add('目前庫存','官方庫存尚未核實');add('官方出貨','尚未核實');add('台灣配送','尚未核實');}add('近兩年缺貨',history.status==='evidenced'?`已取證 ${history.entries.length} 次觀測`:'尚未取得證據；上榜不代表缺貨');add('觀測起點',history.coverage_start?time(history.coverage_start)+'；更早歷史未知':'尚未開始缺貨觀測');
+ const add=(name,value)=>facts.append(el('dt',name),el('dd',value));add('商品身份',observed?item.variant:item.identity_scope==='storefront_item'?'Apple '+item.product_id+' · '+item.region+' 商店':item.identity_scope==='brand_model'?item.brand+' · '+item.title+' · 型號層級，顏色未拆分':'ISBN '+item.isbn);add('來源市場',observed?item.region:chart.country);if(chart)add('原榜名次',chart.source_name+' · '+chart.period_label+' · '+rankLabel(entry)+(entry.identity_scope==='brand_model'?'（日本型號榜）':''));
+ if(!observed&&item.product_kind!=='digital'){add('目前庫存','官方庫存尚未核實');add('官方出貨','尚未核實');add('台灣配送','尚未核實');}if(item.product_kind==='digital')add('商品類型','數位商品；不作實體缺貨或配送判定');add('近兩年缺貨',item.product_kind==='digital'?'本榜未提供實體缺貨證據':history.status==='evidenced'?`已取證 ${history.entries.length} 次觀測`:'尚未取得證據；上榜不代表缺貨');add('觀測起點',history.coverage_start?time(history.coverage_start)+'；更早歷史未知':'尚未開始缺貨觀測');
  add('首次缺貨觀測',history.first_shortage_observed_on||'尚未觀測');add('本地規格缺貨公告',(history.evidence_counts?.dated_official_announcements||0)+' 筆已核實');add('缺貨持續時間','未知；觀測日不等於開始日');
  if(observed){add('來源價格',item.price?`${item.currency} ${Number(item.price).toLocaleString('zh-TW')}`:'待核實');add('來源取證',time(item.fetched_at)+(item.stale?' · 已過期':''));}
- if(entry)add('詳頁身份',entry.identity_scope==='brand_model'?'原榜品牌與完整型號；不同市場／SKU 分開':entry.detail_checked?'原榜 ISBN 已與原始商品頁核對':'僅原榜 ISBN；原始詳頁尚未核對');if(observed||entry?.identity_scope==='brand_model'){const details=el('details',undefined,observed?'purchase-history':'model-facts');details.append(el('summary',observed?'缺貨證據與原始身份':'原榜身份與未核實範圍'),facts);panel.append(details);}else panel.append(facts);
+ if(entry)add('詳頁身份',entry.identity_scope==='brand_model'?'原榜品牌與完整型號；不同市場／SKU 分開':entry.identity_scope==='storefront_item'?'官方feed內容ID＋商店地區；未核ISBN或實體版本':entry.detail_checked?'原榜 ISBN 已與原始商品頁核對':'僅原榜 ISBN；原始詳頁尚未核對');if(observed||entry?.identity_scope==='brand_model'){const details=el('details',undefined,observed?'purchase-history':'model-facts');details.append(el('summary',observed?'缺貨證據與原始身份':'原榜身份與未核實範圍'),facts);panel.append(details);}else panel.append(facts);
  if(observed&&entry?.identity_scope==='brand_model')panel.append(variantChoices(entry,chart));
  for(const gap of history.evidence_gaps||[])panel.append(el('p',`${gap.observed_date} · 舊紀錄缺原始佐證，未計入已驗證缺貨。`,'tiny'));
  for(const event of item.related_supply_history||[]){const box=el('section',undefined,'source-state');box.append(el('h3','日本型號供貨紀錄'),el('p',`${event.published_date} · 官方確認先前曾停接單`),el('p',`${event.announcement_effective_date} · 宣布恢復接單，並非現貨保證`,'muted'),el('p','未分顏色；不作台灣 SKU 缺貨證據。開始日與結束日未知。','tiny'),link('查看日本官方公告',event.source_url),el('p',`公告取證 ${time(event.fetched_at)}`,'tiny'));panel.append(box);}
@@ -207,10 +234,10 @@ function renderProduct(key){
  container.append(panel);
 }
 function renderModelHistory(){
- const box=$('model-history-content');box.replaceChildren();const evidence=snapshot.model_history||{events:[],quality:{}};
- $('model-history-state').textContent=evidence.quality.status==='partial'?'部分型號證據未通過查核':`${evidence.events.length} 則型號事件 · 不計入 SKU 缺貨觀測`;
- for(const event of evidence.events){const row=el('article',undefined,'source-state');row.append(el('h3',event.title),el('p','型號級 · 地區／顏色／尺寸未確認','pill'),el('p',event.published_date+' · 官方商店回覆當時售罄'),el('p','目前庫存、熱度、出貨與配送另行核實。','muted'));const button=el('button','查看型號歷史 →','detail-button');button.dataset.returnKey='model:'+event.model_key;button.addEventListener('click',()=>navigate('product/'+encodeURIComponent(event.model_key),{key:button.dataset.returnKey,label:'型號歷史'}));row.append(button);box.append(row);}
- if(!evidence.events.length)box.append(el('p','尚無可驗的近兩年型號售罄事件。','muted'));
+ const box=$('model-history-content');box.replaceChildren();const evidence=snapshot.model_history||{events:[],quality:{}};const scopedEvents=evidence.events.filter(e=>(trackingCategory==='all'||trackingCategory==='包袋／戶外')&&(trackingRegion==='all'||e.market===trackingRegion));
+ $('model-history-state').textContent=evidence.quality.status==='partial'?'部分型號證據未通過查核':`${scopedEvents.length} 則型號事件 · 不計入 SKU 缺貨觀測`;
+ for(const event of scopedEvents){const row=el('article',undefined,'source-state');row.append(el('h3',event.title),el('p','型號級 · 地區／顏色／尺寸未確認','pill'),el('p',event.published_date+' · 官方商店回覆當時售罄'),el('p','目前庫存、熱度、出貨與配送另行核實。','muted'));const button=el('button','查看型號歷史 →','detail-button');button.dataset.returnKey='model:'+event.model_key;button.addEventListener('click',()=>navigate('product/'+encodeURIComponent(event.model_key),{key:button.dataset.returnKey,label:'型號歷史'}));row.append(button);box.append(row);}
+ if(!scopedEvents.length)box.append(el('p','尚無可驗的近兩年型號售罄事件。','muted'));
 }
 function renderModelDetail(event,key,container){
  const option=(event.current_options||[]).find(o=>key===event.model_key+':option:'+o.option_id);
@@ -230,4 +257,4 @@ $('tickets-back').addEventListener('click',()=>navigate(lastListMode));
 $('tickets-reload').addEventListener('click',async()=>{const b=$('tickets-reload');if(b.disabled)return;b.disabled=true;b.textContent='讀取中…';$('tickets-feedback').textContent=publicStatic()?'正在讀取發布快照…':'正在讀取本機收據…';const ok=await load();b.disabled=false;b.textContent=publicStatic()?'重新讀取發布快照':'重新讀取本機收據';$('tickets-feedback').textContent=ok?(publicStatic()?'發布快照已讀取；本次未向 Encore 發出更新請求。':'本機收據已載入；本次未向 Encore 發出更新請求。'):'資料讀取失敗；保留畫面資料，可重試。';});
 if(typeof history!=='undefined'&&'scrollRestoration' in history)history.scrollRestoration='manual';
 if(typeof addEventListener==='function')addEventListener('hashchange',()=>{const target=location.hash.slice(1)||'rankings';if(target!==renderedRoute)renderRoute(target,true);});
-$('search').addEventListener('input',render);for(const button of document.querySelectorAll('[data-filter]'))button.addEventListener('click',()=>{filter=button.dataset.filter;for(const b of document.querySelectorAll('[data-filter]')){const selected=b===button;b.classList.toggle('selected',selected);b.setAttribute('aria-pressed',String(selected));}render();});load();
+$('search').addEventListener('input',()=>{trackingPage=1;render();});for(const button of document.querySelectorAll('[data-filter]'))button.addEventListener('click',()=>{filter=button.dataset.filter;trackingPage=1;for(const b of document.querySelectorAll('[data-filter]')){const selected=b===button;b.classList.toggle('selected',selected);b.setAttribute('aria-pressed',String(selected));}render();});load();
