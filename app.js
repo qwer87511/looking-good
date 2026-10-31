@@ -2,26 +2,55 @@
 const $ = id => document.getElementById(id);
 const statuses = {out_of_stock:'缺貨',in_stock:'來源有貨',preorder:'預購',backorder:'接受候補',discontinued:'已停產',unknown:'庫存待核實'};
 let snapshot = null, filter = 'all', poll = null;
+let windowSource=null,windowProjectionDay=null,windowTimer=null;
 let currentMode='rankings',lastListMode='rankings';
 let returnPoint=null,renderedRoute=null;
 let ticketFilter='upcoming_sales';
 let rankingSource='all';
 let rankingCategory='all',rankingCountry='all',rankingPeriod='all',rankingSearch='',rankingPage=1;
+let rankingPreviousScope=null;
 let trackingCategory='all',trackingRegion='all',trackingPage=1;
 const countryName=value=>({TW:'台灣',JP:'日本',US:'美國',KR:'韓國',CA:'加拿大',AU:'澳洲',DE:'德國',GB:'英國',unknown:'地區未核實'}[value]||value);
 const rankLabel=e=>e.rank==null?'原榜位置 '+e.source_position:'第 '+e.rank+' 名';
 const chartCategory=c=>c.category_group||(c.source_id==='capa-yodobashi-compact'?'相機／光學':'書籍');
+const chartIsPhysical=c=>c.entries.length>0&&c.entries.every(e=>e.product_kind!=='digital'&&(e.isbn||e.identity_scope==='brand_model'));
 const chartStale=c=>c.stale||!Number.isFinite(Date.parse(c.fetched_at))||Date.parse(c.fetched_at)>Date.now()||Date.now()-Date.parse(c.fetched_at)>=(c.freshness_seconds||3600)*1000;
 const itemCategory=i=>i.category||((i.source_id==='adafruit'||i.source==='Adafruit')?'電子零件／開發板':i.source_id==='hanchor'?'包袋／戶外':i.source_id==='canon-tw'?'相機／光學':'未分類');
-function scopeSelect(container,id,label,values,current,onChange){const wrap=el('label',undefined,'scope-select');wrap.append(el('span',label));const select=el('select');select.id=id;for(const value of ['all',...new Set(values)]){const option=el('option',value==='all'?'全部':id.includes('country')||id.includes('region')?countryName(value):value);option.value=value;select.append(option);}select.value=current;select.addEventListener('change',()=>onChange(select.value));wrap.append(select);container.append(wrap);}
+function scopeSelect(container,id,label,values,current,onChange){const wrap=el('label',undefined,'scope-select');wrap.append(el('span',label));const select=el('select');select.id=id;for(const value of ['all',...new Set(values)]){const option=el('option',value==='all'?'全部':value==='physical'?'實體商品':id.includes('country')||id.includes('region')?countryName(value):value);option.value=value;select.append(option);}select.value=current;select.addEventListener('change',()=>onChange(select.value));wrap.append(select);container.append(wrap);}
 const publicStatic=()=>snapshot?.publication?.mode==='static';
 const time = value => value ? new Intl.DateTimeFormat('zh-TW',{timeZone:'Asia/Taipei',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(value)) : '尚未取證';
 const stamp=value=>value?new Intl.DateTimeFormat('zh-TW',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(value)):'未取證';
 function el(tag, text, cls){const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;return e;}
 function link(title,url){const a=el('a',title);try{const u=new URL(url);if(u.protocol!=='https:')return el('span','來源網址待核實');a.href=u.href;a.target='_blank';a.rel='noopener noreferrer';}catch{return el('span','來源網址待核實');}return a;}
 function say(text,error=false){$('feedback').textContent=text;$('feedback').classList.toggle('error',error);}
-function currentStock(item){const at=Date.parse(item.fetched_at),failed=(snapshot?.source_runs||[]).some(r=>r.source_id===(item.source_id||'adafruit')&&['failed','blocked'].includes(r.status)&&Date.parse(r.finished_at)>=at);return item.stale||!Number.isFinite(at)||at>Date.now()||Date.now()-at>=3600000||failed?'unknown':item.stock;}
-function historyNote(item){return item.shortage_history?.status==='evidenced'?'曾觀測缺貨；後來有貨、預購或未知仍保留此事實。觀測點不代表起始日，兩點之間未知。':'尚無已驗證缺貨；日本供貨公告與本地庫存分開。';}
+function stockExpired(item){const at=Date.parse(item.fetched_at);return Boolean(item.stale)||Number.isFinite(at)&&Date.now()-at>=3600000;}
+function currentStock(item){const at=Date.parse(item.fetched_at),failed=(snapshot?.source_runs||[]).some(r=>r.source_id===(item.source_id||'adafruit')&&['failed','blocked'].includes(r.status)&&Date.parse(r.finished_at)>=at);return stockExpired(item)||!Number.isFinite(at)||at>Date.now()||failed?'unknown':item.stock;}
+function calendarDay(value){if(typeof value!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(value))return null;const at=Date.parse(value+'T00:00:00Z');return Number.isFinite(at)&&new Date(at).toISOString().slice(0,10)===value?value:null;}
+function taipeiDay(at){const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date(at));return ['year','month','day'].map(k=>parts.find(p=>p.type===k).value).join('-');}
+function trackingWindow(at=Date.now()){const end=taipeiDay(at),year=Number(end.slice(0,4))-2,monthDay=end.slice(4);return {start_date:calendarDay(year+monthDay)||(year+'-02-28'),end_date:end};}
+function historyEntryDay(entry){const at=entry.observed_at;if(typeof at!=='string'||!/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(at)||!calendarDay(at.slice(0,10))||!calendarDay(entry.observed_date))return null;const parsed=Date.parse(at);return Number.isFinite(parsed)&&parsed<=Date.now()&&taipeiDay(parsed)===entry.observed_date?entry.observed_date:null;}
+function projectHistoryWindow(){
+ if(!snapshot)return false;const window=trackingWindow();if(windowProjectionDay===window.end_date)return false;
+ const source=windowSource||snapshot;windowProjectionDay=window.end_date;
+ const items=(source.items||[]).map(item=>{const original=item.shortage_history||{entries:[]},dated=(original.entries||[]).filter(e=>e.variant_id===item.variant_id&&historyEntryDay(e));
+  const entries=dated.filter(e=>e.observed_date>=window.start_date&&e.observed_date<=window.end_date).sort((a,b)=>a.observed_date.localeCompare(b.observed_date));
+  const older=dated.filter(e=>e.observed_date<window.start_date);
+  return {...item,shortage_history:{...original,status:entries.length?'evidenced':'unverified',entries,window_start:window.start_date,outside_window_count:older.length,evidence_counts:{...original.evidence_counts,stock_observations:entries.length},first_shortage_observed_on:entries[0]?.observed_date||null,last_shortage_observed_on:entries.at(-1)?.observed_date||null}};
+ });
+ const model=source.model_history||{events:[],quality:{}},events=[],archived=[];
+ for(const event of model.events||[]){const day=calendarDay(event.published_date),reason=!day?'unknown_date':day<window.start_date?'older':day>window.end_date?'future':null;const value={...event,window_reason:reason};(reason?archived:events).push(value);}
+ const byKey=new Map(items.map(i=>[i.key,i]));const rankings=(source.rankings||[]).map(c=>({...c,entries:c.entries.map(e=>e.linked_variants?{...e,linked_variants:e.linked_variants.map(v=>({...v,shortage_status:byKey.get(v.key)?.shortage_history?.status||'unverified'}))}:e)}));
+ snapshot={...source,items,rankings,tracking_window:{...source.tracking_window,...window},model_history:{...model,events,archived_events:archived}};return true;
+}
+function scheduleHistoryWindow(){if(typeof window==='undefined')return;if(windowTimer)clearTimeout(windowTimer);const day=trackingWindow().end_date,delay=Date.parse(day+'T00:00:00+08:00')+86400000-Date.now()+10;windowTimer=setTimeout(refreshHistoryWindow,Math.max(10,delay));}
+function refreshHistoryWindow(){
+ if(projectHistoryWindow()){
+  const active=document.activeElement,controls=[...$('product-content').querySelectorAll('button,a,summary,h2')],index=controls.indexOf(active),id=active?.id,key=active?.dataset?.returnKey,x=window.scrollX,y=window.scrollY,expanded=[...$('product-content').querySelectorAll('details')].map(d=>d.open);
+  render();[...$('product-content').querySelectorAll('details')].forEach((d,i)=>{d.open=Boolean(expanded[i]);});const restore=id?$(id):key?[...document.querySelectorAll('[data-return-key]')].find(n=>n.dataset.returnKey===key):index>=0?[...$('product-content').querySelectorAll('button,a,summary,h2')][index]:null;
+  restore?.focus?.({preventScroll:true});if(!restore&&key)focusRoute();else window.scrollTo({left:x,top:y,behavior:'instant'});
+ }scheduleHistoryWindow();
+}
+function historyNote(item){return item.shortage_history?.status==='evidenced'?'曾觀測缺貨；後來有貨、預購或未知仍保留此事實。觀測點不代表起始日，兩點之間未知。':item.shortage_history?.outside_window_count?'本窗口無缺貨觀測；較早歷史仍保留。':'尚無已驗證缺貨；日本供貨公告與本地庫存分開。';}
 function purchaseSummary(item,entry,chart){
  const section=el('section',undefined,'purchase-summary');section.setAttribute('aria-label','可購狀態與下一步');
  const policy=item.source_verification,official=policy?.official_source==='verified';
@@ -32,7 +61,7 @@ function purchaseSummary(item,entry,chart){
  section.append(link(official?'查看官方最新狀態 ↗':'查看來源最新狀態 ↗',item.url));
  if(chart)section.append(el('p',`${chart.country==='JP'?'日本':chart.country}榜第 ${entry.rank} 名 · ${chart.period_label}`,'purchase-ranking'));
  const facts=el('dl');const add=(name,value)=>facts.append(el('dt',name),el('dd',value));
- add('庫存觀測',`${statuses[item.stock]||'未知'} · ${stamp(item.fetched_at)}${item.stale?' · 已過期，非目前保證':''}`);
+ add('庫存觀測',`${statuses[item.stock]||'未知'} · ${stamp(item.fetched_at)}${stockExpired(item)?' · 已過期，非目前保證':''}`);
  add('官方來源',official?policy.operator:item.official_dispatch==='verified'?item.source+' · 品牌來源已核實':'身份待核實');
  add('實際出貨方',item.official_dispatch==='verified'?'已核實 · 依來源政策':'未明示／待核實');
  add('配送地區',item.taiwan_shipping==='verified'?'已核實':policy?'未明示；地址／離島待核實':'配送及地址待核實');
@@ -60,7 +89,7 @@ function card(item){
  const history=el('div',undefined,'history');for(const h of item.history||[])history.append(el('p',`${time(h.fetched_at)}　${statuses[h.stock]||'未知'}${h.evidence_integrity?.stock_proof==='incomplete'?'（舊佐證不完整）':''}`,'tiny'));detail.append(history);b.append(detail);c.append(b);return c;
 }
 function render(){
- if(!snapshot)return;const items=(snapshot.items||[]).filter(x=>x.shortage_history?.status==='evidenced');const run=snapshot.latest_run;
+ if(!snapshot)return;projectHistoryWindow();const items=(snapshot.items||[]).filter(x=>x.shortage_history?.status==='evidenced');const run=snapshot.latest_run;
  $('count').textContent=new Set(items.map(x=>x.source+':'+x.product_id)).size;$('shortage').textContent=items.filter(x=>currentStock(x)==='out_of_stock').length;$('verified').textContent=items.filter(x=>currentStock(x)==='in_stock'&&x.purchasable_verified).length;$('queue-count').textContent=(snapshot.candidate_queue||[]).length;
  $('freshness').textContent=run?`最近執行 ${time(run.finished_at)}`:'尚未執行來源查核';
  $('scope').textContent='本次更新 Canon 台灣 · 單次 1 型號 · 1 小時快取';
@@ -75,7 +104,7 @@ function render(){
  $('tracking-result-count').textContent='符合 '+selected.length+' 個規格 · 第 '+trackingPage+'／'+pages+' 頁；目前庫存與曾缺貨分開。';
  const cards=$('cards');cards.replaceChildren();for(const item of selected.slice((trackingPage-1)*8,trackingPage*8))cards.append(card(item));
  const pager=$('tracking-pages');pager.replaceChildren();if(pages>1){for(const [label,step] of [['← 上一頁',-1],['下一頁 →',1]]){const b=el('button',label);b.dataset.trackingPage=step;b.disabled=trackingPage+step<1||trackingPage+step>pages;b.addEventListener('click',()=>{trackingPage+=step;render();const focus=pager.querySelector('[data-tracking-page="'+step+'"]');(focus?.disabled?pager.querySelector('button:not(:disabled)'):focus)?.focus();$('tracking-result-count').scrollIntoView?.({block:'start'});});pager.append(b);}}
- if(!selected.length){const empty=el('div',undefined,'empty');empty.append(el('strong',items.length?'目前沒有符合的商品':'等待第一筆官方觀測'),el('p',filter==='purchasable'?'只有庫存、官方出貨與台灣配送都核實，才會出現在這裡。':'可調整篩選，或按「查核來源」取得真實資料。','muted'));cards.append(empty);}
+ if(!selected.length){const empty=el('div',undefined,'empty');empty.append(el('strong',items.length?'目前沒有符合的商品':(snapshot.items.length?'目前窗口無已驗證缺貨':'等待第一筆官方觀測')),el('p',filter==='purchasable'?'只有庫存、官方出貨與台灣配送都核實，才會出現在這裡。':'可調整篩選，或按「查核來源」取得真實資料。','muted'));cards.append(empty);}
  $('coverage').textContent=snapshot.coverage.region+'。'+snapshot.coverage.demand+'。';$('gaps').textContent='尚未覆蓋：'+snapshot.coverage.gaps.join('、')+'。';
  $('tracking-window').textContent=snapshot.tracking_window?`${snapshot.tracking_window.start_date} 至 ${snapshot.tracking_window.end_date} · 只計已取證缺貨`:'僅列出已取得近兩年缺貨證據的規格';
  renderRankings();renderRoute(typeof location==='undefined'?currentMode:location.hash.slice(1)||'rankings');
@@ -115,17 +144,19 @@ function renderRankings(){
  const container=$('ranking-content');container.replaceChildren();const charts=(snapshot.rankings||[]).map(c=>({...c,stale:chartStale(c)}));
  const scopes=$('ranking-scopes');scopes.replaceChildren();
  const change=(key,value)=>{if(key==='category')rankingCategory=value;if(key==='country')rankingCountry=value;if(key==='period')rankingPeriod=value;rankingSource='all';rankingPage=1;rankingSearch='';renderRankings();$('ranking-'+key)?.focus?.();say('已篩選榜單；保留原地區、期間與口徑。');};
- scopeSelect(scopes,'ranking-category','品類',[...charts.map(chartCategory),'包袋／戶外'],rankingCategory,v=>change('category',v));scopeSelect(scopes,'ranking-country','地區',[...charts.map(c=>c.country),'KR'],rankingCountry,v=>change('country',v));scopeSelect(scopes,'ranking-period','期間',charts.map(c=>c.period_label),rankingPeriod,v=>change('period',v));
- const filtered=charts.filter(c=>(rankingCategory==='all'||chartCategory(c)===rankingCategory)&&(rankingCountry==='all'||c.country===rankingCountry)&&(rankingPeriod==='all'||c.period_label===rankingPeriod));
+ scopeSelect(scopes,'ranking-category','品類',['physical',...charts.map(chartCategory),'包袋／戶外'],rankingCategory,v=>change('category',v));scopeSelect(scopes,'ranking-country','地區',[...charts.map(c=>c.country),'KR'],rankingCountry,v=>change('country',v));scopeSelect(scopes,'ranking-period','期間',charts.map(c=>c.period_label),rankingPeriod,v=>change('period',v));
+ const filtered=charts.filter(c=>(rankingCategory==='all'||rankingCategory==='physical'&&chartIsPhysical(c)||chartCategory(c)===rankingCategory)&&(rankingCountry==='all'||c.country===rankingCountry)&&(rankingPeriod==='all'||c.period_label===rankingPeriod));
  if(rankingSource!=='all'&&!filtered.some(c=>c.source_id===rankingSource))rankingSource='all';
  const controls=$('ranking-filters');controls.replaceChildren();
  const choose=id=>{rankingSource=id;rankingPage=1;rankingSearch='';renderRankings();$('ranking-content').scrollIntoView?.({block:'start'});$('ranking-content').querySelector('h3')?.focus?.();};
  const all=el('button','榜單目錄 '+filtered.length);all.dataset.rankingSource='all';all.addEventListener('click',()=>choose('all'));controls.append(all);
- $('ranking-source-count').textContent=charts.length+' 份真榜 · '+charts.reduce((n,c)=>n+c.entries.length,0)+' 個來源榜項';
+ if(rankingPreviousScope){const undo=el('button','還原剛才篩選');undo.id='ranking-restore-scope';undo.addEventListener('click',()=>{const previous=rankingPreviousScope;if(!previous)return;rankingPreviousScope=null;rankingCategory=previous.category;rankingCountry=previous.country;rankingPeriod=previous.period;rankingSource='all';rankingPage=1;rankingSearch='';renderRankings();$('ranking-country').focus();});controls.append(undo);}
+ const physical=charts.filter(chartIsPhysical),digital=charts.filter(c=>c.entries.length>0&&c.entries.every(e=>e.product_kind==='digital'));
+ $('ranking-source-count').textContent='實體 '+physical.length+' 榜 · '+physical.reduce((n,c)=>n+c.entries.length,0)+' 項 ／ 數位 '+digital.length+' 榜 · '+digital.reduce((n,c)=>n+c.entries.length,0)+' 項';
  if(rankingSource==='all'){
+  if(!filtered.length){const empty=el('section',undefined,'chart ranking-recovery');const heading=el('h3',rankingCountry==='KR'&&rankingCategory==='包袋／戶外'?'韓國包款尚未接入':'此條件尚無已接入真榜');empty.append(heading,el('p','可用實體榜：台灣書籍、日本相機。','muted'));if(physical.length){const recover=el('button','查看 '+physical.length+' 份可用實體榜');recover.id='ranking-recover-physical';recover.addEventListener('click',()=>{if(!rankingPreviousScope)rankingPreviousScope={category:rankingCategory,country:rankingCountry,period:rankingPeriod};rankingCategory='physical';rankingCountry='all';rankingPeriod='all';rankingSource='all';rankingPage=1;rankingSearch='';renderRankings();const first=$('ranking-content').querySelector('h3');if(first){first.tabIndex=-1;first.focus();} });empty.append(recover);}container.append(empty);}
   for(const c of filtered){const panel=el('article',undefined,'chart chart-index');panel.append(el('h3',c.source_name+' · '+c.chart_name),el('p',countryName(c.country)+' · '+c.category+' · '+c.period_label,'muted'),el('p',c.entries.length+' 項 · '+(c.stale?'資料過期':'來源已取證'),'tiny'));const b=el('button','開啟榜單 →');b.dataset.rankingSource=c.source_id;b.addEventListener('click',()=>choose(c.source_id));panel.append(b);container.append(panel);}
-  if((rankingCountry==='all'||rankingCountry==='KR')&&(rankingCategory==='all'||rankingCategory==='包袋／戶外')){const missing=el('article',undefined,'chart chart-index pending-source');missing.append(el('h3','MUSINSA 韓國男士側背包'),el('p','待取得允許來源 · 尚未接入','pill'),el('p','既有自動存取限制保留；性別、側背包分類與真期間待核實。不是其他男裝或女包榜。','muted'));container.append(missing);}
-  if(!filtered.length)container.append(el('p','此條件尚無已接入真榜。','empty'));
+  if((rankingCountry==='all'||rankingCountry==='KR')&&(rankingCategory==='all'||rankingCategory==='physical'||rankingCategory==='包袋／戶外')){const missing=el('article',undefined,'chart chart-index pending-source');missing.append(el('h3','MUSINSA 韓國男士側背包'),el('p','待取得允許來源 · 尚未接入','pill'),el('p','既有自動存取限制保留；性別、側背包分類與真期間待核實。不是其他男裝或女包榜。','muted'));container.append(missing);}
  }else{
   const chart=filtered.find(c=>c.source_id===rankingSource),panel=el('article',undefined,'chart');const heading=el('h3',chart.source_name+' · '+chart.chart_name);heading.tabIndex=-1;panel.append(heading,el('p',countryName(chart.country)+' · '+chart.category+' · '+chart.period_label,'pill'),el('p','來源更新 '+stamp(chart.source_updated_at)+' · 取得 '+stamp(chart.fetched_at)+(chart.stale?' · 已過期':''),'tiny'));
   const search=el('input');search.id='ranking-item-search';search.type='search';search.placeholder='在這份榜找商品';search.setAttribute('aria-label','在所選榜單搜尋商品');search.value=rankingSearch;search.addEventListener('input',()=>{rankingSearch=search.value;rankingPage=1;const at=search.selectionStart;renderRankings();const next=$('ranking-item-search');next.focus();next.setSelectionRange?.(at,at);});panel.append(search);
@@ -140,6 +171,7 @@ function renderRankings(){
  const states=$('ranking-status');states.replaceChildren();for(const source of snapshot.ranking_source_status||[]){const box=el('div',undefined,'source-state');box.append(el('strong',source.source),el('p',source.reason,'muted'),link('來源狀態依據',source.url));states.append(box);}
 }
 function renderRoute(target,announce=false){
+ if(projectHistoryWindow())render();
  if(!snapshot)return;const detail=target.startsWith('product/');currentMode=detail?'product':target==='tickets'?'tickets':target==='tracking'?'tracking':'rankings';if(['rankings','tracking'].includes(currentMode))lastListMode=currentMode;
  $('ranking-mode').hidden=currentMode!=='rankings';$('tracking-mode').hidden=currentMode!=='tracking';$('product-mode').hidden=!detail;
  $('tickets-mode').hidden=currentMode!=='tickets';$('tickets-back').textContent='← 返回'+(lastListMode==='tracking'?'熱銷追蹤':'熱銷排行');
@@ -205,7 +237,7 @@ function variantChoices(entry,chart){
 }
 function renderProduct(key){
  const container=$('product-content');container.replaceChildren();const back=el('button','← 返回'+(returnPoint?.mode===lastListMode?returnPoint.label:lastListMode==='rankings'?'熱銷排行':'熱銷追蹤'));container.append(back);
- const model=(snapshot.model_history?.events||[]).find(e=>key===e.model_key||(e.current_options||[]).some(o=>key===e.model_key+':option:'+o.option_id));
+ const model=[...(snapshot.model_history?.events||[]),...(snapshot.model_history?.archived_events||[])].find(e=>key===e.model_key||(e.current_options||[]).some(o=>key===e.model_key+':option:'+o.option_id));
  if(model){if(key===model.model_key)back.addEventListener('click',()=>navigate(lastListMode));renderModelDetail(model,key,container);return;}
  back.addEventListener('click',()=>navigate(lastListMode));
  const observed=(snapshot.items||[]).find(x=>x.key===key);let entry=null,chart=null;
@@ -222,9 +254,9 @@ function renderProduct(key){
  if(observed){const timeline=el('section',undefined,'history');timeline.append(el('h3','歷史觀測 · 不代表目前庫存'),el('p',historyNote(item),'muted'));for(const h of [...(item.history||[])].reverse()){const excluded=h.evidence_integrity?.stock_proof==='incomplete';timeline.append(el('p',`${stamp(h.fetched_at)} · ${statuses[h.stock]||'未知'}${excluded?' · 缺原件，已排除':''}`,'tiny'))}panel.append(timeline);}
  const facts=el('dl');const history=item.shortage_history||{status:'unverified',entries:[]};
  const add=(name,value)=>facts.append(el('dt',name),el('dd',value));add('商品身份',observed?item.variant:item.identity_scope==='storefront_item'?'Apple '+item.product_id+' · '+item.region+' 商店':item.identity_scope==='brand_model'?item.brand+' · '+item.title+' · 型號層級，顏色未拆分':'ISBN '+item.isbn);add('來源市場',observed?item.region:chart.country);if(chart)add('原榜名次',chart.source_name+' · '+chart.period_label+' · '+rankLabel(entry)+(entry.identity_scope==='brand_model'?'（日本型號榜）':''));
- if(!observed&&item.product_kind!=='digital'){add('目前庫存','官方庫存尚未核實');add('官方出貨','尚未核實');add('台灣配送','尚未核實');}if(item.product_kind==='digital')add('商品類型','數位商品；不作實體缺貨或配送判定');add('近兩年缺貨',item.product_kind==='digital'?'本榜未提供實體缺貨證據':history.status==='evidenced'?`已取證 ${history.entries.length} 次觀測`:'尚未取得證據；上榜不代表缺貨');add('觀測起點',history.coverage_start?time(history.coverage_start)+'；更早歷史未知':'尚未開始缺貨觀測');
- add('首次缺貨觀測',history.first_shortage_observed_on||'尚未觀測');add('本地規格缺貨公告',(history.evidence_counts?.dated_official_announcements||0)+' 筆已核實');add('缺貨持續時間','未知；觀測日不等於開始日');
- if(observed){add('來源價格',item.price?`${item.currency} ${Number(item.price).toLocaleString('zh-TW')}`:'待核實');add('來源取證',time(item.fetched_at)+(item.stale?' · 已過期':''));}
+ if(!observed&&item.product_kind!=='digital'){add('目前庫存','官方庫存尚未核實');add('官方出貨','尚未核實');add('台灣配送','尚未核實');}if(item.product_kind==='digital')add('商品類型','數位商品；不作實體缺貨或配送判定');add('近兩年缺貨',item.product_kind==='digital'?'本榜未提供實體缺貨證據':history.status==='evidenced'?`已取證 ${history.entries.length} 次觀測`:history.outside_window_count?'本窗口無缺貨觀測；較早證據保留':'尚未取得證據；上榜不代表缺貨');add('觀測起點',history.coverage_start?time(history.coverage_start)+'；更早歷史未知':'尚未開始缺貨觀測');
+ add('首次缺貨觀測',history.first_shortage_observed_on||(history.outside_window_count?'本窗口尚無觀測':'尚未觀測'));add('本地規格缺貨公告',(history.evidence_counts?.dated_official_announcements||0)+' 筆已核實');add('缺貨持續時間','未知；觀測日不等於開始日');
+ if(observed){add('來源價格',item.price?`${item.currency} ${Number(item.price).toLocaleString('zh-TW')}`:'待核實');add('來源取證',time(item.fetched_at)+(stockExpired(item)?' · 已過期':''));}
  if(entry)add('詳頁身份',entry.identity_scope==='brand_model'?'原榜品牌與完整型號；不同市場／SKU 分開':entry.identity_scope==='storefront_item'?'官方feed內容ID＋商店地區；未核ISBN或實體版本':entry.detail_checked?'原榜 ISBN 已與原始商品頁核對':'僅原榜 ISBN；原始詳頁尚未核對');if(observed||entry?.identity_scope==='brand_model'){const details=el('details',undefined,observed?'purchase-history':'model-facts');details.append(el('summary',observed?'缺貨證據與原始身份':'原榜身份與未核實範圍'),facts);panel.append(details);}else panel.append(facts);
  if(observed&&entry?.identity_scope==='brand_model')panel.append(variantChoices(entry,chart));
  for(const gap of history.evidence_gaps||[])panel.append(el('p',`${gap.observed_date} · 舊紀錄缺原始佐證，未計入已驗證缺貨。`,'tiny'));
@@ -240,6 +272,7 @@ function renderModelHistory(){
  if(!scopedEvents.length)box.append(el('p','尚無可驗的近兩年型號售罄事件。','muted'));
 }
 function renderModelDetail(event,key,container){
+ if(event.window_reason)container.append(el('p',event.window_reason==='older'?'較早歷史 · 不計入當前兩年窗口':'日期待核實 · 不計入當前兩年窗口','pill'));
  const option=(event.current_options||[]).find(o=>key===event.model_key+':option:'+o.option_id);
  if(option){const old=container.children[0];old.textContent='← 返回型號歷史';old.addEventListener('click',()=>{navigate('product/'+encodeURIComponent(event.model_key));const opener=$('product-content').querySelector('[data-model-option="'+option.option_id+'"]');opener?.focus?.();opener?.scrollIntoView?.({block:'center'});});}
  const panel=el('article',undefined,'product-detail');panel.append(el('p',option?'顏色選項 · 未建立 SKU 庫存觀測':'型號級歷史 · 規格未確認','eyebrow'),el('h2',event.title+(option?' · '+option.color:'')));
@@ -249,7 +282,7 @@ function renderModelDetail(event,key,container){
  if(!option){panel.append(el('h3','當前頁面的選項 · 庫存另行核實'));for(const o of event.current_options||[]){const button=el('button',o.color+' · 庫存未知 →','detail-button');button.dataset.modelOption=o.option_id;button.addEventListener('click',()=>navigate('product/'+encodeURIComponent(event.model_key+':option:'+o.option_id)));panel.append(button);}}
  panel.append(el('p','來源取證通過僅限型號事件，不解除全站 failed 或驗證可買。','tiny'));container.append(panel);
 }
-async function load(){try{const response=await fetch('snapshot.json',{cache:'no-store'});if(!response.ok)throw Error('讀取失敗');snapshot=await response.json();render();return true;}catch{say(publicStatic()?'快照讀取失敗；保留目前畫面，可再次重試。':'無法讀取本機資料，請確認服務啟動後重新整理。',true);$('collect').disabled=false;$('collect').textContent=publicStatic()?'↻ 重試讀取快照':'↻ 重試查核';return false;}}
+async function load(){try{const response=await fetch('snapshot.json',{cache:'no-store'});if(!response.ok)throw Error('讀取失敗');snapshot=await response.json();windowSource=snapshot;windowProjectionDay=null;render();scheduleHistoryWindow();return true;}catch{say(publicStatic()?'快照讀取失敗；保留目前畫面，可再次重試。':'無法讀取本機資料，請確認服務啟動後重新整理。',true);$('collect').disabled=false;$('collect').textContent=publicStatic()?'↻ 重試讀取快照':'↻ 重試查核';return false;}}
 $('collect').addEventListener('click',async()=>{if($('collect').disabled)return;if(publicStatic()){$('collect').disabled=true;$('collect').textContent='讀取中…';say('正在讀取發布快照…');const ok=await load();if(ok)say('快照已讀取；官方庫存未重新查核。');return;}$('collect').disabled=true;$('collect').textContent='Canon 更新中…';say('已開始 Canon 台灣單次查核…');try{const r=await fetch('api/collect',{method:'POST',headers:{'X-Local-Action':'collect'}});if(r.status!==202&&r.status!==409)throw Error('啟動失敗');await load();}catch{say('無法啟動 Canon 查核。可在本機重試，或用終端 collect --source canon-tw --limit 1。',true);$('collect').disabled=false;$('collect').textContent='↻ 重試 Canon';}});
 $('mode-rankings').addEventListener('click',()=>navigate('rankings'));$('mode-tracking').addEventListener('click',()=>navigate('tracking'));
 for(const mode of ['rankings','tracking'])$(mode==='rankings'?'ranking-tickets':'tracking-tickets').addEventListener('click',()=>navigate('tickets',{key:'tickets:'+mode,label:mode==='rankings'?'熱銷排行':'熱銷追蹤'}));
@@ -258,3 +291,5 @@ $('tickets-reload').addEventListener('click',async()=>{const b=$('tickets-reload
 if(typeof history!=='undefined'&&'scrollRestoration' in history)history.scrollRestoration='manual';
 if(typeof addEventListener==='function')addEventListener('hashchange',()=>{const target=location.hash.slice(1)||'rankings';if(target!==renderedRoute)renderRoute(target,true);});
 $('search').addEventListener('input',()=>{trackingPage=1;render();});for(const button of document.querySelectorAll('[data-filter]'))button.addEventListener('click',()=>{filter=button.dataset.filter;trackingPage=1;for(const b of document.querySelectorAll('[data-filter]')){const selected=b===button;b.classList.toggle('selected',selected);b.setAttribute('aria-pressed',String(selected));}render();});load();
+
+if(typeof window!=='undefined'){document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshHistoryWindow();});window.addEventListener('focus',refreshHistoryWindow);}
