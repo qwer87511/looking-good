@@ -3,6 +3,7 @@ const $ = id => document.getElementById(id);
 const statuses = {out_of_stock:'缺貨',in_stock:'來源有貨',preorder:'預購',backorder:'接受候補',discontinued:'已停產',unknown:'庫存待核實'};
 let snapshot = null, filter = 'all', poll = null;
 let windowSource=null,windowProjectionDay=null,windowTimer=null;
+let stockFreshness=null;
 let currentMode='rankings',lastListMode='rankings';
 let returnPoint=null,renderedRoute=null;
 let ticketFilter='upcoming_sales';
@@ -25,6 +26,28 @@ function link(title,url){const a=el('a',title);try{const u=new URL(url);if(u.pro
 function say(text,error=false){$('feedback').textContent=text;$('feedback').classList.toggle('error',error);}
 function stockExpired(item){const at=Date.parse(item.fetched_at);return Boolean(item.stale)||Number.isFinite(at)&&Date.now()-at>=3600000;}
 function currentStock(item){const at=Date.parse(item.fetched_at),failed=(snapshot?.source_runs||[]).some(r=>r.source_id===(item.source_id||'adafruit')&&['failed','blocked'].includes(r.status)&&Date.parse(r.finished_at)>=at);return stockExpired(item)||!Number.isFinite(at)||at>Date.now()||failed?'unknown':item.stock;}
+// Keep rendered stock and recommendations consistent when an observation expires.
+ function installStockFreshness({getSnapshot,getStock,isExpired,render,schedule=(fn,delay)=>setTimeout(fn,delay),cancel=id=>clearTimeout(id),now=()=>Date.now()}){
+  let timer=null,signature=null;
+  const signatureOf=()=>JSON.stringify((getSnapshot()?.items||[]).map(i=>[i.key,getStock(i),isExpired(i)]));
+  function stop(){if(timer!==null)cancel(timer);timer=null;}
+  function arm(){stop();if(document.hidden)return;const at=now(),future=(getSnapshot()?.items||[]).filter(i=>!i.stale&&Number.isFinite(Date.parse(i.fetched_at))&&Date.parse(i.fetched_at)<=at).map(i=>Date.parse(i.fetched_at)+3600000).filter(t=>t>at);if(future.length)timer=schedule(()=>{timer=null;refresh();},Math.min(...future)-at);}
+  function captureAndSchedule(){signature=signatureOf();arm();}
+  function refresh(){
+   if(!getSnapshot()||document.hidden){stop();return;}
+   if(signatureOf()===signature){arm();return;}
+   const active=document.activeElement,container=document.getElementById('product-content'),controls=[...container.querySelectorAll('button,a,summary,h2')],index=controls.indexOf(active),id=active?.id,key=active?.dataset?.returnKey;
+   const x=scrollX,y=scrollY,expanded=[...container.querySelectorAll('details')].map(d=>d.open),selection=typeof active?.selectionStart==='number'?[active.selectionStart,active.selectionEnd]:null;
+   render();
+   [...container.querySelectorAll('details')].forEach((d,i)=>{d.open=Boolean(expanded[i]);});
+   const restored=id?document.getElementById(id):key?[...document.querySelectorAll('[data-return-key]')].find(n=>n.dataset.returnKey===key):index>=0?[...container.querySelectorAll('button,a,summary,h2')][index]:active?.isConnected?active:null;
+   restored?.focus?.({preventScroll:true});if(selection)restored?.setSelectionRange?.(...selection);window.scrollTo({left:x,top:y,behavior:'instant'});captureAndSchedule();
+  }
+  const visible=()=>{if(document.hidden)stop();else refresh();};
+  document.addEventListener('visibilitychange',visible);window.addEventListener('focus',refresh);window.addEventListener('pageshow',refresh);window.addEventListener('pagehide',stop);
+  captureAndSchedule();return {captureAndSchedule,refresh,dispose(){stop();document.removeEventListener('visibilitychange',visible);window.removeEventListener('focus',refresh);window.removeEventListener('pageshow',refresh);window.removeEventListener('pagehide',stop);}};
+ }
+
 function calendarDay(value){if(typeof value!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(value))return null;const at=Date.parse(value+'T00:00:00Z');return Number.isFinite(at)&&new Date(at).toISOString().slice(0,10)===value?value:null;}
 function taipeiDay(at){const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date(at));return ['year','month','day'].map(k=>parts.find(p=>p.type===k).value).join('-');}
 function trackingWindow(at=Date.now()){const end=taipeiDay(at),year=Number(end.slice(0,4))-2,monthDay=end.slice(4);return {start_date:calendarDay(year+monthDay)||(year+'-02-28'),end_date:end};}
@@ -121,6 +144,7 @@ function render(){
  else if((snapshot.source_runs||[run]).some(r=>r&&['failed','blocked','partial'].includes(r.status)))say('最近查核有來源失敗；下列卡片保留最後成功取證。',true);
  else if(run?.mode==='offline_replay')say('目前顯示先前真實取證的離線重播，並非新的網路查核。');
  if(publicStatic()){$('collect').disabled=false;$('collect').textContent='↻ 重新讀取快照';$('collect').title='只重新讀取已發布的資料，不更新官方庫存';}
+ stockFreshness?.captureAndSchedule();
 }
 function navigate(target,opener=null){
  if((target.startsWith('product/')||target==='tickets')&&['rankings','tracking'].includes(currentMode)){
@@ -293,3 +317,5 @@ if(typeof addEventListener==='function')addEventListener('hashchange',()=>{const
 $('search').addEventListener('input',()=>{trackingPage=1;render();});for(const button of document.querySelectorAll('[data-filter]'))button.addEventListener('click',()=>{filter=button.dataset.filter;trackingPage=1;for(const b of document.querySelectorAll('[data-filter]')){const selected=b===button;b.classList.toggle('selected',selected);b.setAttribute('aria-pressed',String(selected));}render();});load();
 
 if(typeof window!=='undefined'){document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshHistoryWindow();});window.addEventListener('focus',refreshHistoryWindow);}
+
+stockFreshness=installStockFreshness({getSnapshot:()=>snapshot,getStock:currentStock,isExpired:stockExpired,render:()=>render()});
